@@ -282,14 +282,24 @@ abstract class SmoothRateLimiter extends RateLimiter {
       this.maxBurstSeconds = maxBurstSeconds;
     }
 
+    /**
+     * 重新设置频率
+     * @param permitsPerSecond
+     * @param stableIntervalMicros
+     *
+     * 原来的 RateLimiter 是用某个 permitsPerSecond 值初始化的，现在我们要调整这个频率。
+     * 对于 maxPermits 来说，是重新计算，而对于 storedPermits 来说，是做等比例的缩放
+     */
     @Override
     void doSetRate(double permitsPerSecond, double stableIntervalMicros) {
       double oldMaxPermits = this.maxPermits;
+      // 这里计算了，maxPermits 为 1 秒产生的 permits
       maxPermits = maxBurstSeconds * permitsPerSecond;
       if (oldMaxPermits == Double.POSITIVE_INFINITY) {
         // if we don't special-case this, we would get storedPermits == NaN, below
         storedPermits = maxPermits;
       } else {
+        // 因为 storedPermits 的值域变化了，需要等比例缩放
         storedPermits =
             (oldMaxPermits == 0.0)
                 ? 0.0 // initial state
@@ -308,12 +318,16 @@ abstract class SmoothRateLimiter extends RateLimiter {
     }
   }
 
+  // 当前还有多少 permits 没有被使用，被存下来的 permits 数量
   /** The currently stored permits. */
   double storedPermits;
 
+  // 最大允许缓存的 permits 数量，也就是 storedPermits 能达到的最大值
   /** The maximum number of stored permits. */
   double maxPermits;
 
+  // 每隔多少时间产生一个 permit，
+  // 比如我们构造方法中设置每秒 5 个，也就是每隔 200ms 一个，这里单位是微秒，也就是 200,000
   /**
    * The interval between two unit requests, at our stable rate. E.g., a stable rate of 5 permits
    * per second has a stable interval of 200ms.
@@ -324,6 +338,7 @@ abstract class SmoothRateLimiter extends RateLimiter {
    * The time when the next request (no matter its size) will be granted. After granting a request,
    * this is pushed further in the future. Large requests push this further than small requests.
    */
+  // 下一次可以获取 permits 的时间，这个时间是相对 RateLimiter 的构造时间的，是一个相对时间，理解为时间戳吧
   private long nextFreeTicketMicros = 0L; // could be either in the past or future
 
   private SmoothRateLimiter(SleepingStopwatch stopwatch) {
@@ -332,8 +347,12 @@ abstract class SmoothRateLimiter extends RateLimiter {
 
   @Override
   final void doSetRate(double permitsPerSecond, long nowMicros) {
+    // 同步
     resync(nowMicros);
+    // 计算属性 stableIntervalMicros
+    // 1 s / 频率数 = 每个permits的间隔时间
     double stableIntervalMicros = SECONDS.toMicros(1L) / permitsPerSecond;
+    // 设置
     this.stableIntervalMicros = stableIntervalMicros;
     doSetRate(permitsPerSecond, stableIntervalMicros);
   }
@@ -352,15 +371,24 @@ abstract class SmoothRateLimiter extends RateLimiter {
 
   @Override
   final long reserveEarliestAvailable(int requiredPermits, long nowMicros) {
+    // 这里做一次同步，更新 storedPermits 和 nextFreeTicketMicros (如果需要)
     resync(nowMicros);
+    // 返回值就是 nextFreeTicketMicros，注意刚刚已经做了 resync 了，此时它是最新的正确的值
     long returnValue = nextFreeTicketMicros;
+    // storedPermits 中可以使用多少个 permits
     double storedPermitsToSpend = min(requiredPermits, this.storedPermits);
+    //  storedPermits 中不够的部分
+    // 如果storedPermits > requiredPermits,说明存储够，freshPermits = 0
+    // 如果storedPermits < requiredPermits,存储不够，freshPermits = requiredPermits - storedPermits
     double freshPermits = requiredPermits - storedPermitsToSpend;
+    // 为了这个不够的部分，需要等待多久时间
     long waitMicros =
         storedPermitsToWaitTime(this.storedPermits, storedPermitsToSpend)
             + (long) (freshPermits * stableIntervalMicros);
 
+    // 将 nextFreeTicketMicros 往前推
     this.nextFreeTicketMicros = LongMath.saturatedAdd(nextFreeTicketMicros, waitMicros);
+    // storedPermits 减去被拿走的部分
     this.storedPermits -= storedPermitsToSpend;
     return returnValue;
   }
@@ -380,10 +408,15 @@ abstract class SmoothRateLimiter extends RateLimiter {
   abstract double coolDownIntervalMicros();
 
   /** Updates {@code storedPermits} and {@code nextFreeTicketMicros} based on the current time. */
+  // 调整 storedPermits 和 nextFreeTicketMicros
+  // 在关键的节点，需要先更新一下 storedPermits 到正确的值。
   void resync(long nowMicros) {
     // if nextFreeTicket is in the past, resync to now
+    // 如果nextFreeTicket是过去的了，立刻同步
     if (nowMicros > nextFreeTicketMicros) {
+      // coolDownIntervalMicros：一个 permit 的时间长度
       double newPermits = (nowMicros - nextFreeTicketMicros) / coolDownIntervalMicros();
+      // 最大缓存的数量 和 存储值+新增加的值  两者只能取最小的一个作为缓存值，不然缓存的太多容易打垮系统
       storedPermits = min(maxPermits, storedPermits + newPermits);
       nextFreeTicketMicros = nowMicros;
     }

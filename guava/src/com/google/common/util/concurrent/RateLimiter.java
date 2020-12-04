@@ -129,9 +129,16 @@ public abstract class RateLimiter {
     return create(permitsPerSecond, SleepingStopwatch.createFromSystemTimer());
   }
 
+  /**
+   *
+   * @param permitsPerSecond 每秒产生多少个permits
+   * @param stopwatch
+   * @return
+   */
   @VisibleForTesting
   static RateLimiter create(double permitsPerSecond, SleepingStopwatch stopwatch) {
-    RateLimiter rateLimiter = new SmoothBursty(stopwatch, 1.0 /* maxBurstSeconds */);
+    // 0 <= storedPermits <= maxPermits = permitsPerSecond
+    RateLimiter rateLimiter = new SmoothBursty(stopwatch, 1.0 /* maxBurstSeconds 最多缓存1s钟 */);
     rateLimiter.setRate(permitsPerSecond);
     return rateLimiter;
   }
@@ -251,6 +258,7 @@ public abstract class RateLimiter {
    * @param permitsPerSecond the new stable rate of this {@code RateLimiter}
    * @throws IllegalArgumentException if {@code permitsPerSecond} is negative or zero
    */
+  // 调整速率
   public final void setRate(double permitsPerSecond) {
     checkArgument(
         permitsPerSecond > 0.0 && !Double.isNaN(permitsPerSecond), "rate must be positive");
@@ -300,8 +308,12 @@ public abstract class RateLimiter {
    */
   @CanIgnoreReturnValue
   public double acquire(int permits) {
+    // 预约，如果当前不能直接获取到 permits，需要等待
+    // 返回值代表需要 sleep 多久
     long microsToWait = reserve(permits);
+    // sleep
     stopwatch.sleepMicrosUninterruptibly(microsToWait);
+    // 返回sleep时长
     return 1.0 * microsToWait / SECONDS.toMicros(1L);
   }
 
